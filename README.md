@@ -1,4 +1,6 @@
 /home/exouser/simulation_ws/src/waypoints_visualizer/wp.yaml
+0 6 6 10
+2 22 22 11
 # Gazebo ROS Actor Plugin
 
 ## About

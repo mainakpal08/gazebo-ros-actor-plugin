@@ -8,64 +8,57 @@ from tf.transformations import quaternion_from_euler
 import networkx as nx
 import yaml
 import uuid
+import time
+import threading
+
+LINEAR_VELOCITY = 1.0
+START_DELAY = 20.0
 
 def get_waypoints_array_with_position_orientation(path, waypoints):
-    """
-    Given a list of waypoint indices and a list of waypoints,
-    return the corresponding waypoints' positions and orientations as an array.
-    """
     return [{'index': idx, 
              'position': waypoints[idx]['position'], 
              'orientation': waypoints[idx]['orientation']} 
             for idx in path]
 
 def generate_path(graph, waypoints, start, end):
-    """
-    Generate a path from start to end node.
-    """
     path = nx.shortest_path(graph, source=start, target=end)
     return get_waypoints_array_with_position_orientation(path, waypoints)
 
+def calculate_distance(pos1, pos2):
+    return math.sqrt((pos1['x'] - pos2['x'])**2 + (pos1['y'] - pos2['y'])**2)
+
+def calculate_duration(path_data):
+    total_distance = 0.0
+    for i in range(len(path_data) - 1):
+        pos1 = path_data[i]['position']
+        pos2 = path_data[i + 1]['position']
+        total_distance += calculate_distance(pos1, pos2)
+    return total_distance / LINEAR_VELOCITY
+
 def publish_path(start, end, path_topic):
-    # Load the yaml file
-    file_path = '/home/exouser/simulation_ws/src/waypoints_visualizer/wp.yaml'  # Update this path to your wp.yaml file
+    file_path = '/home/exouser/simulation_ws/src/waypoints_visualizer/wp.yaml'
     with open(file_path, 'r') as file:
         data = yaml.safe_load(file)
 
-    # Extract waypoints and edges
     waypoints = data['waypoints']
     edges = data['edges']
 
-    # Create a graph
     G = nx.Graph()
-
-    # Add nodes with positions
     for idx, wp in enumerate(waypoints):
         G.add_node(idx, pos=(wp['position']['x'], wp['position']['y']))
 
-    # Add edges
     for edge in edges:
         if edge['start'] != edge['end']:
             G.add_edge(edge['start'], edge['end'])
 
-    # Generate the path
     path_data = generate_path(G, waypoints, start, end)
 
-    # Initialize the node with a unique name
-    node_name = 'path_publisher_node_' + str(uuid.uuid4())
-    rospy.init_node(node_name, anonymous=True)
-    
-    # Create the publisher with the specified topic and message type "Path"
     pub = rospy.Publisher(path_topic, Path, queue_size=1, latch=True)
     
-    # Create the Path message
     path_msg = Path()
-    
-    # Set the header for the Path message
     path_msg.header.stamp = rospy.Time.now()
     path_msg.header.frame_id = "map"
     
-    # Create the PoseStamped messages for each waypoint
     for wp in path_data:
         pose = PoseStamped()
         pose.header.stamp = rospy.Time.now()
@@ -79,22 +72,58 @@ def publish_path(start, end, path_topic):
         )
         path_msg.poses.append(pose)
     
-    # Publish the Path message to the specified topic
-    rate = rospy.Rate(10)  # Publish at 10 Hz
     pub.publish(path_msg)
     print(f'Published path on {path_topic}:', path_msg)
-    while not rospy.is_shutdown():
-        rate.sleep()
+
+    return calculate_duration(path_data)
+
+def execute_courses_of_action(courses, path_topic):
+    initial_setup_done = False
+    for course in courses:
+        start_node = course['start']
+        end_node = course['end']
+        wait_time = course['wait']
+        duration = publish_path(start_node, end_node, path_topic)
+        if not initial_setup_done:
+            time.sleep(duration+wait_time+START_DELAY)
+            initial_setup_done = True
+        else:
+            time.sleep(duration+wait_time)
+
+def run_agent(courses, path_topic):
+    execute_courses_of_action(courses, path_topic)
 
 if __name__ == '__main__':
-    try:
-        parser = argparse.ArgumentParser(description="Publish a path from start to end node")
-        parser.add_argument('start', type=int, help='Start node index')
-        parser.add_argument('end', type=int, help='End node index')
-        parser.add_argument('actor', type=int, choices=[1, 2], help='Actor number (1 or 2)')
-        args = parser.parse_args()
+    rospy.init_node('multi_agent_path_publisher_node', anonymous=True)
 
-        path_topic = f'/cmd_path_actor{args.actor}'
-        publish_path(args.start, args.end, path_topic)
-    except rospy.ROSInterruptException:
-        pass
+    with open('/home/exouser/simulation_ws/src/waypoints_visualizer/trajectory.yaml', 'r') as file:
+        courses = yaml.safe_load(file)
+
+    # Define courses of action for both agents
+    # courses_of_action_agent1 = [
+    #     {'start': 0, 'end': 6, 'wait': 3},
+    #     {'start': 6, 'end': 10, 'wait': 4},
+    # ]
+
+    # courses_of_action_agent2 = [
+    #     {'start': 2, 'end': 22, 'wait': 5},
+    #     {'start': 22, 'end': 11, 'wait': 5},
+    # ]
+
+    courses_of_action_agent1 = courses['agent1']
+    courses_of_action_agent2 = courses['agent2']
+
+    path_topic_agent1 = '/cmd_path_actor1'
+    path_topic_agent2 = '/cmd_path_actor2'
+
+    # Create threads for each agent
+    thread_agent1 = threading.Thread(target=run_agent, args=(courses_of_action_agent1, path_topic_agent1))
+    thread_agent2 = threading.Thread(target=run_agent, args=(courses_of_action_agent2, path_topic_agent2))
+
+    # Start the threads
+    thread_agent1.start()
+    thread_agent2.start()
+
+    # Wait for both threads to complete
+    thread_agent1.join()
+    thread_agent2.join()
